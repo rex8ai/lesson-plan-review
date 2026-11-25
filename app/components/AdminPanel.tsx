@@ -330,7 +330,7 @@ export default function AdminPanel() {
                 {!versionChoice && <option value="">Select a version…</option>}
                 {versions.map((v) => (
                   <option key={v.id} value={v.id}>
-                    {v.name} ({plural(v.response_count, 'response')})
+                    {v.name}
                   </option>
                 ))}
                 <option value={NEW_VERSION}>＋ Create new version…</option>

@@ -55,6 +55,12 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
 
+/** Seeded names are "key — Title (Age n–n)"; the dropdown only needs the key. */
+function responseOptionLabel(name: string) {
+  const head = name.split(' — ')[0] ?? name;
+  return head.replace(/\s*\(Age\s+[^)]*\)\s*$/i, '').trim() || name;
+}
+
 export default function LessonTester() {
   const [versions, setVersions] = useState<VersionRow[]>([]);
   const [versionId, setVersionId] = useState('');
@@ -276,7 +282,7 @@ export default function LessonTester() {
           ) : (
             versions.map((v) => (
               <option key={v.id} value={v.id}>
-                {v.name} ({plural(v.response_count, 'response')})
+                {v.name}
               </option>
             ))
           )}
@@ -294,7 +300,7 @@ export default function LessonTester() {
           ) : (
             responses.map((row) => (
               <option key={row.id} value={row.id}>
-                {row.name}
+                {responseOptionLabel(row.name)}
                 {row.comment_count ? ` · ${plural(row.comment_count, 'comment')}` : ''}
               </option>
             ))
