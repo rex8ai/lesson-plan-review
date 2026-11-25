@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import CommentThread from './CommentThread';
 import {
   OVERALL_FEEDBACK_KEY,
   normalizePlan,
@@ -9,10 +10,11 @@ import {
   sortedSections,
 } from '@/lib/lesson';
 import type {
+  CommentRow,
   LessonResource,
   LessonResponseRow,
-  LessonSection,
-  SectionFeedbackRow,
+  ResponseSummary,
+  VersionRow,
 } from '@/lib/types';
 
 const ICONS = ['◎', '✦', '↗', '◇', '✓', '♡', '▣', '☼'];
@@ -40,118 +42,191 @@ function ResourceChip({ resource }: { resource: LessonResource }) {
   );
 }
 
+const REVIEWER_STORAGE_KEY = 'lpt:reviewer';
+
+async function api<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, { cache: 'no-store', ...init });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data as T;
+}
+
+function plural(n: number, word: string) {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
 export default function LessonTester() {
-  const [rows, setRows] = useState<LessonResponseRow[]>([]);
-  const [selectedId, setSelectedId] = useState('');
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, string>>({});
-  const [draftMap, setDraftMap] = useState<Record<string, string>>({});
+  const [versions, setVersions] = useState<VersionRow[]>([]);
+  const [versionId, setVersionId] = useState('');
+  const [responses, setResponses] = useState<ResponseSummary[]>([]);
+  const [responseId, setResponseId] = useState('');
+  const [detail, setDetail] = useState<LessonResponseRow | null>(null);
+  const [comments, setComments] = useState<CommentRow[]>([]);
+  const [reviewer, setReviewer] = useState('');
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [savingKey, setSavingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loadingList, setLoadingList] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0);
 
-  const selectedRow = useMemo(
-    () => rows.find((r) => r.id === selectedId) || null,
-    [rows, selectedId]
-  );
+  // Selection requested via the URL (?version=…&response=…); consumed once on load.
+  const wanted = useRef<{ version: string | null; response: string | null }>({
+    version: null,
+    response: null,
+  });
 
-  const plan = useMemo(() => normalizePlan(selectedRow?.payload), [selectedRow]);
+  const version = useMemo(() => versions.find((v) => v.id === versionId) || null, [versions, versionId]);
+  const plan = useMemo(() => normalizePlan(detail?.payload), [detail]);
   const sections = useMemo(() => sortedSections(plan), [plan]);
 
-  const loadFeedback = useCallback(async (responseId: string) => {
-    const res = await fetch(`/api/feedback/${encodeURIComponent(responseId)}`);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || 'Failed to load feedback');
-    const next: Record<string, string> = {};
-    for (const row of (data.feedback || []) as SectionFeedbackRow[]) {
-      next[row.section_key] = row.feedback || '';
-    }
-    setFeedbackMap(next);
-    setDraftMap(next);
-  }, []);
+  const commentsByKey = useMemo(() => {
+    const map: Record<string, CommentRow[]> = {};
+    for (const c of comments) (map[c.section_key] ||= []).push(c);
+    return map;
+  }, [comments]);
 
-  const loadResponses = useCallback(async (preferId?: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch('/api/responses', { cache: 'no-store' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `Failed to load responses (${res.status})`);
-      const list = Array.isArray(data.responses) ? (data.responses as LessonResponseRow[]) : [];
-      setRows(list);
-      setSelectedId((current) => {
-        if (preferId && list.some((r) => r.id === preferId)) return preferId;
-        if (current && list.some((r) => r.id === current)) return current;
-        return list[0]?.id || '';
-      });
-    } catch (err) {
-      setRows([]);
-      setSelectedId('');
-      setError(err instanceof Error ? err.message : 'Failed to load');
-    } finally {
-      setLoading(false);
-    }
+  // ── bootstrap: reviewer name + URL selection + versions ────────────────────
+  const loadVersions = useCallback(async () => {
+    const data = await api<{ versions: VersionRow[] }>('/api/versions');
+    setVersions(data.versions);
+    const wantedVersion = wanted.current.version; // capture: state updaters run later
+    wanted.current.version = null;
+    setVersionId((current) => {
+      const pick = (id: string | null) => data.versions.find((v) => v.id === id)?.id;
+      return (
+        pick(wantedVersion) ||
+        pick(current) ||
+        data.versions[data.versions.length - 1]?.id || // newest version by default
+        ''
+      );
+    });
   }, []);
 
   useEffect(() => {
-    void loadResponses();
-  }, [loadResponses]);
+    const params = new URLSearchParams(window.location.search);
+    wanted.current = { version: params.get('version'), response: params.get('response') };
+    setReviewer(window.localStorage.getItem(REVIEWER_STORAGE_KEY) || '');
 
+    loadVersions()
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load versions'))
+      .finally(() => setLoadingList(false));
+  }, [loadVersions]);
+
+  // ── responses of the selected version ──────────────────────────────────────
   useEffect(() => {
-    if (!selectedId) {
-      setFeedbackMap({});
-      setDraftMap({});
-      return;
-    }
+    if (!versionId) return;
     let cancelled = false;
-    void (async () => {
-      try {
-        await loadFeedback(selectedId);
-        if (!cancelled) setCollapsed({});
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : 'Failed to load feedback');
-        }
-      }
-    })();
+    setLoadingList(true);
+    api<{ responses: ResponseSummary[] }>(`/api/responses?versionId=${versionId}`)
+      .then((data) => {
+        if (cancelled) return;
+        setError(null);
+        setResponses(data.responses);
+        const wantedResponse = wanted.current.response; // capture: state updaters run later
+        wanted.current.response = null;
+        setResponseId((current) => {
+          const pick = (id: string | null) => data.responses.find((r) => r.id === id)?.id;
+          return pick(wantedResponse) || pick(current) || data.responses[0]?.id || '';
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setResponses([]);
+        setResponseId('');
+        setError(err instanceof Error ? err.message : 'Failed to load responses');
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingList(false);
+      });
     return () => {
       cancelled = true;
     };
-  }, [selectedId, loadFeedback]);
+  }, [versionId, reloadTick]);
 
-  async function saveFeedbackForKey(key: string, sectionTitle: string | null) {
-    if (!selectedId) return;
-    setSavingKey(key);
+  // ── selected response: payload + its comments ──────────────────────────────
+  useEffect(() => {
+    setDetail(null);
+    setComments([]);
+    if (!responseId) return;
+    let cancelled = false;
+    setLoadingDetail(true);
+    Promise.all([
+      api<LessonResponseRow>(`/api/responses/${responseId}`),
+      api<{ comments: CommentRow[] }>(`/api/responses/${responseId}/comments`),
+    ])
+      .then(([row, c]) => {
+        if (cancelled) return;
+        setError(null);
+        setDetail(row);
+        setComments(c.comments);
+        setCollapsed({});
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load response');
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingDetail(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [responseId, reloadTick]);
+
+  // Keep the URL shareable so teammates land on the same version + response.
+  useEffect(() => {
+    if (!versionId) return;
+    const params = new URLSearchParams({ version: versionId });
+    if (responseId) params.set('response', responseId);
+    window.history.replaceState(null, '', `?${params.toString()}`);
+  }, [versionId, responseId]);
+
+  function reload() {
     setError(null);
-    try {
-      const res = await fetch(
-        `/api/feedback/${encodeURIComponent(selectedId)}/${encodeURIComponent(key)}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            feedback: draftMap[key] ?? '',
-            sectionTitle,
-          }),
-        }
-      );
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || 'Save failed');
-      setFeedbackMap((prev) => ({ ...prev, [key]: data.feedback || '' }));
-      setDraftMap((prev) => ({ ...prev, [key]: data.feedback || '' }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Save failed');
-    } finally {
-      setSavingKey(null);
-    }
+    void loadVersions().catch((err) =>
+      setError(err instanceof Error ? err.message : 'Failed to load versions')
+    );
+    setReloadTick((n) => n + 1);
   }
 
-  async function saveFeedback(section: LessonSection, index: number) {
-    await saveFeedbackForKey(sectionKeyOf(section, index), section.title || null);
+  function changeVersion(id: string) {
+    setResponseId('');
+    setResponses([]);
+    setVersionId(id);
   }
 
-  async function saveOverallFeedback() {
-    await saveFeedbackForKey(OVERALL_FEEDBACK_KEY, 'Overall lesson plan');
+  function changeReviewer(value: string) {
+    setReviewer(value);
+    window.localStorage.setItem(REVIEWER_STORAGE_KEY, value);
+  }
+
+  // ── comments ───────────────────────────────────────────────────────────────
+  function bumpCount(delta: number) {
+    setResponses((list) =>
+      list.map((r) =>
+        r.id === responseId ? { ...r, comment_count: Math.max(0, r.comment_count + delta) } : r
+      )
+    );
+  }
+
+  async function addComment(sectionKey: string, sectionTitle: string | null, body: string) {
+    const created = await api<CommentRow>(`/api/responses/${responseId}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sectionKey,
+        sectionTitle,
+        author: reviewer.trim() || 'Anonymous',
+        body,
+      }),
+    });
+    setComments((list) => [...list, created]);
+    bumpCount(1);
+  }
+
+  async function deleteComment(comment: CommentRow) {
+    await api(`/api/responses/${responseId}/comments/${comment.id}`, { method: 'DELETE' });
+    setComments((list) => list.filter((c) => c.id !== comment.id));
+    bumpCount(-1);
   }
 
   function expandAll() {
@@ -174,10 +249,8 @@ export default function LessonTester() {
     )
     .join(' | ');
 
-  const selectValue = rows.some((r) => r.id === selectedId) ? selectedId : '';
-  const overallSaved = feedbackMap[OVERALL_FEEDBACK_KEY] || '';
-  const overallDraft = draftMap[OVERALL_FEEDBACK_KEY] ?? overallSaved;
-  const overallDirty = overallDraft !== overallSaved;
+  const overallComments = commentsByKey[OVERALL_FEEDBACK_KEY] || [];
+  const noResponses = !loadingList && !!versionId && !responses.length;
 
   return (
     <>
@@ -191,30 +264,45 @@ export default function LessonTester() {
       </header>
 
       <div className="toolbar">
-        <label htmlFor="responseSelect">Test response</label>
+        <label htmlFor="versionSelect">Version</label>
         <select
-          id="responseSelect"
-          value={selectValue}
-          disabled={loading || !rows.length}
-          onChange={(e) => setSelectedId(e.target.value)}
+          id="versionSelect"
+          value={versionId}
+          disabled={!versions.length}
+          onChange={(e) => changeVersion(e.target.value)}
         >
-          {!rows.length ? (
-            <option value="">{loading ? 'Loading…' : 'No responses'}</option>
+          {!versions.length ? (
+            <option value="">{loadingList ? 'Loading…' : 'No versions'}</option>
           ) : (
-            rows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.name}
+            versions.map((v) => (
+              <option key={v.id} value={v.id}>
+                {v.name} ({plural(v.response_count, 'response')})
               </option>
             ))
           )}
         </select>
-        <button
-          className="primary"
-          type="button"
-          disabled={loading}
-          onClick={() => void loadResponses(selectedId || undefined)}
+
+        <label htmlFor="responseSelect">Response</label>
+        <select
+          id="responseSelect"
+          value={responseId}
+          disabled={!responses.length}
+          onChange={(e) => setResponseId(e.target.value)}
         >
-          {loading ? 'Loading…' : 'Reload'}
+          {!responses.length ? (
+            <option value="">{loadingList ? 'Loading…' : 'No responses'}</option>
+          ) : (
+            responses.map((row) => (
+              <option key={row.id} value={row.id}>
+                {row.name}
+                {row.comment_count ? ` · ${plural(row.comment_count, 'comment')}` : ''}
+              </option>
+            ))
+          )}
+        </select>
+
+        <button className="primary" type="button" disabled={loadingList} onClick={reload}>
+          {loadingList ? 'Loading…' : 'Reload'}
         </button>
         <button type="button" onClick={expandAll} disabled={!sections.length}>
           Expand all
@@ -222,33 +310,48 @@ export default function LessonTester() {
         <button type="button" onClick={collapseAll} disabled={!sections.length}>
           Collapse all
         </button>
+
+        <label className="toolbar-right" htmlFor="reviewerName">
+          Commenting as
+        </label>
+        <input
+          id="reviewerName"
+          className="reviewer-input"
+          value={reviewer}
+          maxLength={60}
+          placeholder="Your name"
+          onChange={(e) => changeReviewer(e.target.value)}
+        />
       </div>
 
-      {plan && (
+      {plan && detail && (
         <div className="meta">
-          {selectedRow ? <span className="chip">{selectedRow.name}</span> : null}
           <span className="chip">
             Age {plan.ageStart ?? '?'}–{plan.ageEnd ?? '?'}
           </span>
           <span className="chip">{plan.status || 'Status unavailable'}</span>
           {schedule ? <span className="chip">{schedule}</span> : null}
-          <span className="chip">{sections.length} sections</span>
+          <span className="chip">{plural(sections.length, 'section')}</span>
+          <span className="chip">{plural(comments.length, 'comment')}</span>
+          {version?.description ? <span className="chip-note">{version.description}</span> : null}
         </div>
       )}
 
       <main className="page">
         {error && <div className="error">{error}</div>}
-        {loading && !plan && <div className="empty">Loading lesson plan…</div>}
-        {!loading && !plan && !error && (
-          <div className="empty">No lesson plan found.</div>
+        {(loadingList || loadingDetail) && !plan && <div className="empty">Loading lesson plan…</div>}
+        {noResponses && !error && (
+          <div className="empty">
+            No responses in {version?.name || 'this version'} yet. Add one from /admin.
+          </div>
         )}
-        {!loading && selectedRow && !plan && (
+        {!loadingDetail && detail && !plan && (
           <div className="error">
-            Could not parse lesson payload for “{selectedRow.name}”. Check the JSON in /admin.
+            Could not parse lesson payload for “{detail.name}”. Check the JSON in /admin.
           </div>
         )}
 
-        {plan && (
+        {plan && detail && (
           <>
             <h1 className="lesson-title">{plan.title || 'Untitled lesson plan'}</h1>
             <p className="lesson-desc">{plan.description || ''}</p>
@@ -257,9 +360,7 @@ export default function LessonTester() {
               const key = sectionKeyOf(section, index);
               const items = parseDescription(section.description);
               const isCollapsed = !!collapsed[key];
-              const saved = feedbackMap[key] || '';
-              const draft = draftMap[key] ?? saved;
-              const dirty = draft !== saved;
+              const sectionComments = commentsByKey[key] || [];
 
               return (
                 <section key={key} className={`section${isCollapsed ? ' collapsed' : ''}`}>
@@ -269,18 +370,16 @@ export default function LessonTester() {
                       {section.title || 'Untitled section'}
                     </div>
                     <div className="actions">
-                      {saved.trim() ? (
-                        <span className="feedback-badge" title="Has feedback">
-                          feedback
+                      {sectionComments.length ? (
+                        <span className="feedback-badge" title="Comments on this section">
+                          {plural(sectionComments.length, 'comment')}
                         </span>
                       ) : null}
                       <button
                         className="action"
                         type="button"
                         aria-label={isCollapsed ? 'Expand section' : 'Collapse section'}
-                        onClick={() =>
-                          setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }))
-                        }
+                        onClick={() => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }))}
                       >
                         {isCollapsed ? '⌄' : '⌃'}
                       </button>
@@ -310,29 +409,14 @@ export default function LessonTester() {
                     )}
 
                     <div className="feedback">
-                      <div className="feedback-label">
-                        Section feedback
-                        {saved.trim() ? <span className="feedback-badge">saved</span> : null}
-                      </div>
-                      <textarea
-                        value={draft}
-                        placeholder="name: your feedback here"
-                        onChange={(e) =>
-                          setDraftMap((prev) => ({ ...prev, [key]: e.target.value }))
-                        }
+                      <div className="feedback-label">Section comments</div>
+                      <CommentThread
+                        comments={sectionComments}
+                        placeholder="Add a comment on this section…"
+                        submitLabel="Add comment"
+                        onAdd={(body) => addComment(key, section.title || null, body)}
+                        onDelete={deleteComment}
                       />
-                      <div className="feedback-row">
-                        <button
-                          type="button"
-                          disabled={savingKey === key || !dirty}
-                          onClick={() => void saveFeedback(section, index)}
-                        >
-                          {savingKey === key ? 'Saving…' : 'Save feedback'}
-                        </button>
-                        <span className="feedback-note">
-                          Hint: write as <b>name: feedback</b> to save
-                        </span>
-                      </div>
                     </div>
                   </div>
                 </section>
@@ -352,34 +436,21 @@ export default function LessonTester() {
 
             <div className="overall-feedback">
               <div className="overall-feedback-head">
-                <h3>Overall lesson plan feedback</h3>
-                {overallSaved.trim() ? <span className="feedback-badge">saved</span> : null}
+                <h3>Overall lesson plan comments</h3>
+                {overallComments.length ? (
+                  <span className="feedback-badge">{plural(overallComments.length, 'comment')}</span>
+                ) : null}
               </div>
               <p className="overall-feedback-desc">
-                Share feedback on the whole lesson plan (not just one section).
+                Comment on the whole lesson plan (not just one section).
               </p>
-              <textarea
-                value={overallDraft}
-                placeholder="name: your overall feedback here"
-                onChange={(e) =>
-                  setDraftMap((prev) => ({
-                    ...prev,
-                    [OVERALL_FEEDBACK_KEY]: e.target.value,
-                  }))
-                }
+              <CommentThread
+                comments={overallComments}
+                placeholder="Add an overall comment…"
+                submitLabel="Add overall comment"
+                onAdd={(body) => addComment(OVERALL_FEEDBACK_KEY, 'Overall lesson plan', body)}
+                onDelete={deleteComment}
               />
-              <div className="feedback-row">
-                <button
-                  type="button"
-                  disabled={savingKey === OVERALL_FEEDBACK_KEY || !overallDirty}
-                  onClick={() => void saveOverallFeedback()}
-                >
-                  {savingKey === OVERALL_FEEDBACK_KEY ? 'Saving…' : 'Save overall feedback'}
-                </button>
-                <span className="feedback-note">
-                  Hint: write as <b>name: feedback</b> to save
-                </span>
-              </div>
             </div>
           </>
         )}

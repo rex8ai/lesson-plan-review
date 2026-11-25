@@ -33,19 +33,45 @@ export type LessonPlan = {
   resources?: LessonResource[];
 };
 
+/** A named batch of responses that the team reviews together. */
+export type VersionRow = {
+  id: string;
+  ordinal: number;
+  name: string;
+  description: string;
+  created_at: string;
+  response_count: number;
+};
+
+/** Lightweight row used for lists / dropdowns (no payload). */
+export type ResponseSummary = {
+  id: string;
+  name: string;
+  version_id: string;
+  created_at: string;
+  updated_at: string;
+  comment_count: number;
+};
+
+/** Full row including the stored API payload. */
 export type LessonResponseRow = {
   id: string;
   name: string;
+  version_id: string;
   payload: LessonPlan | LessonPlan[];
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 };
 
-export type SectionFeedbackRow = {
+export type CommentRow = {
   id: string;
   response_id: string;
   section_key: string;
   section_title: string | null;
-  feedback: string;
-  updated_at: string;
+  author: string;
+  body: string;
+  created_at: string;
 };
+
+export const COMMENT_LIMITS = { body: 5000, author: 60 } as const;
+export const VERSION_LIMITS = { name: 60, description: 500 } as const;
