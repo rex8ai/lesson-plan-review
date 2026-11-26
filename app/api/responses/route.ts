@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { badRequest, fail, isUuid, readJson, validatePayload } from '@/lib/http';
+import { badRequest, fail, isUuid, readJson } from '@/lib/http';
+import { validatePayload } from '@/lib/lesson';
 import { ensureSchema } from '@/lib/schema';
 import type { LessonResponseRow, ResponseSummary } from '@/lib/types';
 

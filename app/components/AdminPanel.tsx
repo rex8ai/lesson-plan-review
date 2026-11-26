@@ -1,9 +1,19 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { VERSION_LIMITS } from '@/lib/types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  NEW_VERSION,
+  api,
+  defaultResponseName as defaultName,
+  ensureVersion,
+  jsonInit,
+  plural,
+} from '@/lib/client';
+import { suggestVersionName } from '@/lib/lesson';
 import type { LessonResponseRow, ResponseSummary, VersionRow } from '@/lib/types';
+import ApiCaller from './ApiCaller';
+import { NewVersionFields, VersionSelect } from './VersionPicker';
 
 const SAMPLE = `[
   {
@@ -26,30 +36,7 @@ const SAMPLE = `[
   }
 ]`;
 
-/** Sentinel value of the version dropdown: "＋ Create new version…". */
-const NEW_VERSION = '__new__';
 const NEW_RESPONSE = 'new';
-
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store', ...init });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data as T;
-}
-
-const jsonInit = (method: string, body: unknown): RequestInit => ({
-  method,
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify(body),
-});
-
-function defaultName() {
-  return `response on ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`;
-}
-
-function plural(n: number, word: string) {
-  return `${n} ${word}${n === 1 ? '' : 's'}`;
-}
 
 export default function AdminPanel() {
   const [versions, setVersions] = useState<VersionRow[]>([]);
@@ -63,6 +50,9 @@ export default function AdminPanel() {
   const [newVersionName, setNewVersionName] = useState('');
   const [newVersionDesc, setNewVersionDesc] = useState('');
   const [editorReady, setEditorReady] = useState(true);
+  const [apiOpen, setApiOpen] = useState(false);
+  // Response handed over from "Call API → Open in editor"; consumed by the hydrate effect.
+  const draftRef = useRef<{ name: string; json: string } | null>(null);
 
   const [status, setStatus] = useState('Ready');
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +63,7 @@ export default function AdminPanel() {
   const selected = useMemo(() => rows.find((r) => r.id === selectedId) || null, [rows, selectedId]);
   const latestVersion = versions[versions.length - 1];
   const creatingVersion = versionChoice === NEW_VERSION;
-  const suggestedVersionName = `v${(latestVersion?.ordinal ?? -1) + 1}`;
+  const suggestedVersionName = suggestVersionName(versions);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,8 +95,10 @@ export default function AdminPanel() {
   useEffect(() => {
     setError(null);
     if (selectedId === NEW_RESPONSE) {
-      setName(defaultName());
-      setJsonText(SAMPLE);
+      const draft = draftRef.current;
+      draftRef.current = null;
+      setName(draft?.name ?? defaultName());
+      setJsonText(draft?.json ?? SAMPLE);
       setVersionChoice((c) => (c === NEW_VERSION ? c : latestVersion?.id || c));
       setEditorReady(true);
       return;
@@ -163,17 +155,12 @@ export default function AdminPanel() {
 
       // Create the version first when asked; it then becomes the selected one so a
       // failed response save can simply be retried without creating it twice.
-      let versionId = versionChoice;
-      let createdVersion: VersionRow | null = null;
-      if (creatingVersion) {
-        createdVersion = await api<VersionRow>(
-          '/api/versions',
-          jsonInit('POST', { name: newVersionName, description: newVersionDesc })
-        );
-        versionId = createdVersion.id;
-        setVersionChoice(versionId);
-      }
-      if (!versionId) throw new Error('Choose a version');
+      const { id: versionId, created: createdVersion } = await ensureVersion(
+        versionChoice,
+        newVersionName,
+        newVersionDesc
+      );
+      if (createdVersion) setVersionChoice(versionId);
 
       const saved = await api<LessonResponseRow>(
         isNew ? '/api/responses' : `/api/responses/${selectedId}`,
@@ -194,6 +181,30 @@ export default function AdminPanel() {
     } finally {
       setSaving(false);
     }
+  }
+
+  /** Refresh lists after the API panel saved a response (editor selection is left alone). */
+  async function onApiSaved(saved: LessonResponseRow, createdVersion: VersionRow | null) {
+    await load();
+    setStatus(`Saved “${saved.name}”${createdVersion ? ` in new version ${createdVersion.name}` : ''}`);
+  }
+
+  function openInEditor(draft: { name: string; json: string }) {
+    draftRef.current = draft;
+    if (selectedId === NEW_RESPONSE) {
+      // Selection will not change, so the hydrate effect won't run: apply directly.
+      draftRef.current = null;
+      setName(draft.name);
+      setJsonText(draft.json);
+      setEditorReady(true);
+    } else {
+      setSelectedId(NEW_RESPONSE);
+    }
+    setError(null);
+    window.setTimeout(
+      () => document.getElementById('response-editor')?.scrollIntoView({ behavior: 'smooth' }),
+      50
+    );
   }
 
   async function remove() {
@@ -259,6 +270,9 @@ export default function AdminPanel() {
         >
           New version
         </button>
+        <button type="button" className={apiOpen ? 'toggled' : ''} onClick={() => setApiOpen((o) => !o)}>
+          Call API
+        </button>
         <button type="button" disabled={loading} onClick={() => void load()}>
           Refresh list
         </button>
@@ -314,7 +328,17 @@ export default function AdminPanel() {
           })}
         </aside>
 
-        <section className="admin-editor page">
+        <div className="admin-main">
+        {apiOpen && (
+          <ApiCaller
+            versions={versions}
+            suggestedVersionName={suggestedVersionName}
+            onClose={() => setApiOpen(false)}
+            onSaved={onApiSaved}
+            onOpenInEditor={openInEditor}
+          />
+        )}
+        <section id="response-editor" className="admin-editor page">
           <h1 className="lesson-title">{isNew ? 'Add response' : 'Edit response'}</h1>
           <p className="lesson-desc">
             Every response belongs to one version. Reviewers pick a version in the tester and
@@ -324,18 +348,7 @@ export default function AdminPanel() {
           {error && <div className="error">{error}</div>}
 
           <div className="admin-row">
-            <label className="admin-field">
-              <span>Version</span>
-              <select value={versionChoice} onChange={(e) => onVersionChange(e.target.value)}>
-                {!versionChoice && <option value="">Select a version…</option>}
-                {versions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    {v.name}
-                  </option>
-                ))}
-                <option value={NEW_VERSION}>＋ Create new version…</option>
-              </select>
-            </label>
+            <VersionSelect versions={versions} value={versionChoice} onChange={onVersionChange} />
 
             <label className="admin-field grow">
               <span>Response name</span>
@@ -351,26 +364,13 @@ export default function AdminPanel() {
           </div>
 
           {creatingVersion && (
-            <div className="new-version-box">
-              <label className="admin-field">
-                <span>New version name</span>
-                <input
-                  value={newVersionName}
-                  maxLength={VERSION_LIMITS.name}
-                  onChange={(e) => setNewVersionName(e.target.value)}
-                  placeholder={suggestedVersionName}
-                />
-              </label>
-              <label className="admin-field grow">
-                <span>What changed in this version? (optional)</span>
-                <input
-                  value={newVersionDesc}
-                  maxLength={VERSION_LIMITS.description}
-                  onChange={(e) => setNewVersionDesc(e.target.value)}
-                  placeholder="e.g. New prompt with age-specific vocabulary"
-                />
-              </label>
-            </div>
+            <NewVersionFields
+              name={newVersionName}
+              description={newVersionDesc}
+              suggestedName={suggestedVersionName}
+              onName={setNewVersionName}
+              onDescription={setNewVersionDesc}
+            />
           )}
 
           <label className="admin-field">
@@ -404,6 +404,7 @@ export default function AdminPanel() {
             {selected && <span className="feedback-note">id: {selected.id}</span>}
           </div>
         </section>
+        </div>
       </main>
     </>
   );

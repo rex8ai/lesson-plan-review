@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { normalizePlan } from '@/lib/lesson';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -38,16 +37,4 @@ export async function readJson<T>(req: Request): Promise<T | null> {
   } catch {
     return null;
   }
-}
-
-/** Returns an error message when the payload is not a usable lesson plan response. */
-export function validatePayload(payload: unknown): string | null {
-  const plan = normalizePlan(payload);
-  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
-    return 'payload must be a lesson plan object (or an array whose first item is one)';
-  }
-  if (!Array.isArray(plan.sections)) {
-    return 'payload has no "sections" array — paste the API response as-is';
-  }
-  return null;
 }

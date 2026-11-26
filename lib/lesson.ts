@@ -64,3 +64,23 @@ export function sectionKeyOf(section: LessonSection, index: number) {
 
 /** Reserved feedback key for whole-lesson comments (stored like section feedback). */
 export const OVERALL_FEEDBACK_KEY = '__overall__';
+
+/** Returns an error message when the payload is not a usable lesson plan response. */
+export function validatePayload(payload: unknown): string | null {
+  const plan = normalizePlan(payload);
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
+    return 'payload must be a lesson plan object (or an array whose first item is one)';
+  }
+  if (!Array.isArray(plan.sections)) {
+    return 'payload has no "sections" array — paste the API response as-is';
+  }
+  return null;
+}
+
+/** Next free `vN` name: starts after the highest ordinal and skips names already taken. */
+export function suggestVersionName(versions: Array<{ ordinal: number; name: string }>): string {
+  const taken = new Set(versions.map((v) => v.name.trim().toLowerCase()));
+  let n = versions.reduce((max, v) => Math.max(max, v.ordinal), -1) + 1;
+  while (taken.has(`v${n}`)) n += 1;
+  return `v${n}`;
+}

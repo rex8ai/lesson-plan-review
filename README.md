@@ -10,6 +10,7 @@ Pages:
 
 - Tester `/` – pick a version, pick a response, comment. The URL (`?version=…&response=…`) is shareable.
 - Admin `/admin` – add / edit / move / delete responses. The **Version** dropdown picks an existing version or `＋ Create new version…`.
+  - **Call API** (toolbar): send a request (path, extra headers, JSON body), watch the loader, then **Save response** into any version under any name, or **Open in editor** to tweak it first. The base URL and API key come from `.env.local` (`LESSON_API_BASE_URL`, `LESSON_API_KEY`) and never reach the browser.
 
 ## Setup
 
@@ -48,6 +49,8 @@ App Router APIs under `app/api/**` run as Node.js serverless functions:
 - `GET/PUT/DELETE /api/responses/[id]` – `PUT` accepts `name`, `payload`, `versionId` (move)
 - `GET/POST /api/responses/[id]/comments` – `POST { sectionKey, sectionTitle, author, body }`
 - `DELETE /api/responses/[id]/comments/[commentId]`
+- `GET /api/proxy` – public config (`baseUrl`, whether the key is set; never the key itself)
+- `POST /api/proxy` – `{ path, method, headers, body }`, called by **Call API**. Sends the request to `LESSON_API_BASE_URL + path` with `X-API-Key: LESSON_API_KEY` added on the server.
 
 The schema migrates itself on the first request (`lib/migrate.js`, one transaction + advisory lock):
 existing responses go to `v0`, and old per-section feedback text is converted into comments (a leading

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { badRequest, fail, readJson } from '@/lib/http';
+import { suggestVersionName } from '@/lib/lesson';
 import { ensureSchema } from '@/lib/schema';
 import { VERSION_LIMITS, type VersionRow } from '@/lib/types';
 
@@ -26,7 +27,7 @@ export async function GET() {
   }
 }
 
-/** Creates the next version. A blank name becomes `v<next ordinal>`. */
+/** Creates the next version. A blank name becomes the next free `vN`. */
 export async function POST(req: Request) {
   try {
     await ensureSchema();
@@ -42,12 +43,20 @@ export async function POST(req: Request) {
       return badRequest(`Description must be at most ${VERSION_LIMITS.description} characters`);
     }
 
+    const finalName =
+      name ||
+      suggestVersionName(
+        (await query<{ ordinal: number; name: string }>(
+          `select ordinal, name from public.lesson_versions`
+        )).rows
+      );
+
     const { rows } = await query<VersionRow>(
       `with next as (select coalesce(max(ordinal), -1) + 1 as ordinal from public.lesson_versions)
        insert into public.lesson_versions (ordinal, name, description)
-       select next.ordinal, coalesce(nullif($1, ''), 'v' || next.ordinal), $2 from next
+       select next.ordinal, $1, $2 from next
        returning id, ordinal, name, description, created_at, 0 as response_count`,
-      [name, description]
+      [finalName, description]
     );
     return NextResponse.json(rows[0], { status: 201 });
   } catch (err) {

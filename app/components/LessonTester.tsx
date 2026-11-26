@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api, plural } from '@/lib/client';
 import CommentThread from './CommentThread';
 import {
   OVERALL_FEEDBACK_KEY,
@@ -43,17 +44,6 @@ function ResourceChip({ resource }: { resource: LessonResource }) {
 }
 
 const REVIEWER_STORAGE_KEY = 'lpt:reviewer';
-
-async function api<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { cache: 'no-store', ...init });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
-  return data as T;
-}
-
-function plural(n: number, word: string) {
-  return `${n} ${word}${n === 1 ? '' : 's'}`;
-}
 
 function isLearningCompetency(title?: string) {
   return (title || '').trim().toLowerCase() === 'learning competency';
