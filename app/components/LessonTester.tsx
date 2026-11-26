@@ -55,6 +55,24 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
 
+function isLearningCompetency(title?: string) {
+  return (title || '').trim().toLowerCase() === 'learning competency';
+}
+
+/**
+ * "C-7.1 - Observes … | “Learners …”" → bold first part, then " - " in place of "|".
+ * Strings without a "|" are returned unchanged.
+ */
+function formatCompetency(item: string) {
+  if (!item.includes('|')) return item;
+  const [head, ...rest] = item.split('|').map((part) => part.trim());
+  return (
+    <>
+      <strong>{head}</strong> - {rest.join(' - ')}
+    </>
+  );
+}
+
 /** Seeded names are "key — Title (Age n–n)"; the dropdown only needs the key. */
 function responseOptionLabel(name: string) {
   const head = name.split(' — ')[0] ?? name;
@@ -396,7 +414,9 @@ export default function LessonTester() {
                     {items.length ? (
                       <ul>
                         {items.map((item, i) => (
-                          <li key={`${key}-${i}`}>{item}</li>
+                          <li key={`${key}-${i}`}>
+                            {isLearningCompetency(section.title) ? formatCompetency(item) : item}
+                          </li>
                         ))}
                       </ul>
                     ) : (
